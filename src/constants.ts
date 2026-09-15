@@ -7,6 +7,7 @@ export const DEFAULT_SETTINGS = {
   targetLanguage: "zh-CN",
   theme: "system",
   triggerMode: "button",
+  selectionShortcut: "Alt+Q",
   showSource: true,
   fontSize: "medium",
   disabledHosts: [],

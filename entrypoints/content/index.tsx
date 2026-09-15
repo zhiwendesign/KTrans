@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Check, Copy, Languages, LoaderCircle, RotateCcw, Settings, Square, X } from "lucide-react";
+import { ArrowLeftRight, Check, ChevronDown, Copy, Languages, LoaderCircle, Pin, RotateCcw, Settings, Square, Volume2, X } from "lucide-react";
 import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root";
-import { MAX_SELECTION_LENGTH } from "../../src/constants";
+import { LANGUAGES, MAX_SELECTION_LENGTH } from "../../src/constants";
 import { t } from "../../src/i18n";
-import { getSettings } from "../../src/storage";
+import { matchesShortcut } from "../../src/shortcut";
+import { getSettings, saveSettings } from "../../src/storage";
 import type { SelectionPayload, Settings as AppSettings, TranslationPortResponse } from "../../src/types";
 import "./style.css";
 
@@ -38,7 +39,7 @@ function currentSelection(fallbackText = ""): SelectionPayload | null {
 
 function getPosition(rect: SelectionPayload["rect"], panel: boolean): React.CSSProperties {
   const width = panel ? Math.min(380, window.innerWidth - 24) : 30;
-  const estimatedHeight = panel ? 360 : 30;
+  const estimatedHeight = panel ? 500 : 30;
   const left = Math.max(12, Math.min(rect.right + 8, window.innerWidth - width - 12));
   const below = rect.bottom + 8;
   const top = below + estimatedHeight <= window.innerHeight
@@ -63,15 +64,29 @@ function Translator() {
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [sourceLanguage, setSourceLanguage] = useState("auto");
+  const [targetLanguage, setTargetLanguage] = useState("zh-CN");
+  const [providerId, setProviderId] = useState("");
   const portRef = useRef<Browser.runtime.Port | null>(null);
   const requestIdRef = useRef<string | null>(null);
   const selectionRef = useRef<SelectionPayload | null>(null);
 
   useEffect(() => {
-    void getSettings().then(setSettings);
+    void getSettings().then((value) => {
+      setSettings(value);
+      setSourceLanguage(value.sourceLanguage);
+      setTargetLanguage(value.targetLanguage);
+      setProviderId(value.defaultProviderId ?? "");
+    });
     const listener = (changes: Record<string, Browser.storage.StorageChange>, area: string) => {
       if (area === "local" && Object.keys(changes).some((key) => key.includes("transpop"))) {
-        void getSettings().then(setSettings);
+        void getSettings().then((value) => {
+          setSettings(value);
+          setSourceLanguage(value.sourceLanguage);
+          setTargetLanguage(value.targetLanguage);
+          setProviderId(value.defaultProviderId ?? "");
+        });
       }
     };
     browser.storage.onChanged.addListener(listener);
@@ -108,7 +123,7 @@ function Translator() {
       setError(t(settings?.locale ?? "zh-CN", "tooLong"));
       return;
     }
-    if (!settings?.defaultProviderId || !settings.providers.some((item) => item.id === settings.defaultProviderId)) {
+    if (!providerId || !settings?.providers.some((item) => item.id === providerId)) {
       setState("error");
       setError(t(settings?.locale ?? "zh-CN", "noProviderDetail"));
       return;
@@ -148,12 +163,12 @@ function Translator() {
       payload: {
         requestId,
         text: selected.text,
-        sourceLanguage: settings.sourceLanguage,
-        targetLanguage: settings.targetLanguage,
-        providerId: settings.defaultProviderId
+        sourceLanguage,
+        targetLanguage,
+        providerId
       }
     });
-  }, [settings, stop]);
+  }, [providerId, settings, sourceLanguage, stop, targetLanguage]);
 
   useEffect(() => {
     const refreshSelection = () => {
@@ -172,14 +187,23 @@ function Translator() {
       if (event.key === "Escape") close();
       else if (event.key === "Shift" || event.key.startsWith("Arrow")) window.setTimeout(refreshSelection, 20);
     };
+    const keyDown = (event: KeyboardEvent) => {
+      if (!settings?.selectionShortcut || !matchesShortcut(event, settings.selectionShortcut)) return;
+      const selected = currentSelection();
+      if (!selected) return;
+      event.preventDefault();
+      event.stopPropagation();
+      startTranslation(selected);
+    };
     const outside = (event: PointerEvent) => {
-      if (!panelOpen) return;
+      if (!panelOpen || pinned) return;
       const path = event.composedPath();
       if (!path.some((node) => node instanceof HTMLElement && node.dataset?.transpopRoot === "true")) close();
     };
     document.addEventListener("pointerup", pointerUp, true);
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keyup", keyUp, true);
+    document.addEventListener("keydown", keyDown, true);
     const message = (payload: { type?: string; text?: string }) => {
       if (payload.type === "translate-current-selection" || payload.type === "translate-context-selection") {
         const selected = currentSelection(payload.text);
@@ -191,9 +215,10 @@ function Translator() {
       document.removeEventListener("pointerup", pointerUp, true);
       document.removeEventListener("pointerdown", outside, true);
       document.removeEventListener("keyup", keyUp, true);
+      document.removeEventListener("keydown", keyDown, true);
       browser.runtime.onMessage.removeListener(message);
     };
-  }, [close, panelOpen, settings?.triggerMode, startTranslation]);
+  }, [close, panelOpen, pinned, settings?.selectionShortcut, settings?.triggerMode, startTranslation]);
 
   useEffect(() => () => portRef.current?.disconnect(), []);
 
@@ -225,6 +250,42 @@ function Translator() {
     }
   };
 
+  const copySource = async () => {
+    await navigator.clipboard.writeText(selection.text).catch(() => undefined);
+  };
+
+  const speakSource = () => {
+    speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(selection.text);
+    if (sourceLanguage !== "auto") utterance.lang = sourceLanguage;
+    speechSynthesis.speak(utterance);
+  };
+
+  const updateLanguage = async (key: "sourceLanguage" | "targetLanguage", value: string) => {
+    if (key === "sourceLanguage") setSourceLanguage(value);
+    else setTargetLanguage(value);
+    const next = { ...settings, [key]: value };
+    setSettings(next);
+    await saveSettings(next);
+  };
+
+  const swapLanguages = async () => {
+    const nextSource = targetLanguage;
+    const nextTarget = sourceLanguage === "auto" ? "en" : sourceLanguage;
+    setSourceLanguage(nextSource);
+    setTargetLanguage(nextTarget);
+    const next = { ...settings, sourceLanguage: nextSource, targetLanguage: nextTarget };
+    setSettings(next);
+    await saveSettings(next);
+  };
+
+  const changeProvider = async (value: string) => {
+    setProviderId(value);
+    const next = { ...settings, defaultProviderId: value };
+    setSettings(next);
+    await saveSettings(next);
+  };
+
   return (
     <section
       data-transpop-root="true"
@@ -236,33 +297,57 @@ function Translator() {
       <header className="tp-header">
         <div className="tp-brand"><Languages size={17} /><strong>KTrans</strong></div>
         <div className="tp-header-actions">
+          <IconButton title={pinned ? (locale === "zh-CN" ? "取消固定" : "Unpin") : (locale === "zh-CN" ? "固定弹窗" : "Pin")} onClick={() => setPinned(!pinned)}><Pin className={pinned ? "tp-pin-active" : ""} size={16} /></IconButton>
           <IconButton title={t(locale, "settings")} onClick={() => void browser.runtime.sendMessage({ type: "open-options" })}><Settings size={16} /></IconButton>
           <IconButton title={t(locale, "close")} onClick={close}><X size={17} /></IconButton>
         </div>
       </header>
 
+      {settings.showSource && <div className="tp-source-card">
+        <div className="tp-source-text">{selection.text}</div>
+        <div className="tp-source-actions">
+          <IconButton title={locale === "zh-CN" ? "朗读原文" : "Read source"} onClick={speakSource}><Volume2 size={17} /></IconButton>
+          <IconButton title={locale === "zh-CN" ? "复制原文" : "Copy source"} onClick={() => void copySource()}><Copy size={16} /></IconButton>
+        </div>
+      </div>}
+
       <div className="tp-language-row">
-        <span>{settings.sourceLanguage === "auto" ? (locale === "zh-CN" ? "自动检测" : "Auto") : settings.sourceLanguage}</span>
-        <span aria-hidden="true">→</span>
-        <span>{settings.targetLanguage}</span>
+        <label>
+          <select aria-label={locale === "zh-CN" ? "源语言" : "Source language"} value={sourceLanguage} onChange={(event) => void updateLanguage("sourceLanguage", event.target.value)}>
+            {LANGUAGES.map(([code, zh, en]) => <option key={code} value={code}>{locale === "zh-CN" ? zh : en}</option>)}
+          </select>
+          <ChevronDown size={14} />
+        </label>
+        <IconButton title={locale === "zh-CN" ? "交换语言" : "Swap languages"} onClick={() => void swapLanguages()}><ArrowLeftRight size={17} /></IconButton>
+        <label>
+          <select aria-label={locale === "zh-CN" ? "目标语言" : "Target language"} value={targetLanguage} onChange={(event) => void updateLanguage("targetLanguage", event.target.value)}>
+            {LANGUAGES.filter(([code]) => code !== "auto").map(([code, zh, en]) => <option key={code} value={code}>{locale === "zh-CN" ? zh : en}</option>)}
+          </select>
+          <ChevronDown size={14} />
+        </label>
       </div>
 
       <div className="tp-body">
-        {settings.showSource && <div className="tp-source">{selection.text}</div>}
-        <div className={`tp-result ${state === "error" ? "tp-error" : ""}`} aria-live="polite">
-          {state === "loading" && !result && <span className="tp-loading"><LoaderCircle className="tp-spin" size={17} />{t(locale, "translating")}</span>}
-          {result || error || (state === "cancelled" ? (locale === "zh-CN" ? "翻译已停止。" : "Translation stopped.") : "")}
+        <div className="tp-provider-card">
+          <div className="tp-provider-heading">
+            <div className="tp-provider-name"><span className="tp-provider-logo"><Languages size={15} /></span>
+              {settings.providers.length > 1 ? (
+                <select aria-label={locale === "zh-CN" ? "翻译服务" : "Provider"} value={providerId} onChange={(event) => void changeProvider(event.target.value)}>
+                  {settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                </select>
+              ) : <strong>{settings.providers.find((provider) => provider.id === providerId)?.name ?? "KTrans"}</strong>}
+            </div>
+            {state === "loading" ? <IconButton title={t(locale, "cancel")} onClick={stop}><Square size={14} /></IconButton> : <IconButton title={t(locale, "retry")} onClick={() => startTranslation(selection)}><RotateCcw size={16} /></IconButton>}
+          </div>
+          <div className={`tp-result ${state === "error" ? "tp-error" : ""}`} aria-live="polite">
+            {state === "loading" && !result && <span className="tp-loading"><LoaderCircle className="tp-spin" size={17} />{t(locale, "translating")}</span>}
+            {result || error || (state === "cancelled" ? (locale === "zh-CN" ? "翻译已停止。" : "Translation stopped.") : "")}
+          </div>
         </div>
       </div>
 
       <footer className="tp-footer">
-        <div>
-          {state === "loading" ? (
-            <IconButton title={t(locale, "cancel")} onClick={stop}><Square size={15} /></IconButton>
-          ) : (
-            <IconButton title={t(locale, "retry")} onClick={() => startTranslation(selection)}><RotateCcw size={16} /></IconButton>
-          )}
-        </div>
+        <span className="tp-shortcut-hint">{settings.selectionShortcut}</span>
         <button className="tp-copy" type="button" disabled={!result} onClick={() => void copy()}>
           {copied ? <Check size={16} /> : <Copy size={16} />}
           <span>{copied ? t(locale, "copied") : t(locale, "copy")}</span>

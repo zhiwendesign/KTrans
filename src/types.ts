@@ -28,6 +28,7 @@ export interface Settings {
   targetLanguage: string;
   theme: ThemeMode;
   triggerMode: TriggerMode;
+  selectionShortcut: string;
   showSource: boolean;
   fontSize: "small" | "medium" | "large";
   disabledHosts: string[];

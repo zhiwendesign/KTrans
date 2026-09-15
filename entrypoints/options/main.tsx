@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Check, ChevronRight, Eye, EyeOff, Languages, Plus, Save, Server, Shield, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, ExternalLink, Eye, EyeOff, Keyboard, Languages, Plus, Save, Server, Shield, Trash2, X } from "lucide-react";
 import { LANGUAGES } from "../../src/constants";
+import { shortcutFromEvent } from "../../src/shortcut";
 import { getSettings, saveSettings } from "../../src/storage";
 import type { ProviderConfig, Settings } from "../../src/types";
 import "./style.css";
@@ -39,6 +40,7 @@ function App() {
   const [showKey, setShowKey] = useState(false);
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [testing, setTesting] = useState(false);
+  const [shortcutMessage, setShortcutMessage] = useState("点击输入框后按下新的组合键");
 
   useEffect(() => {
     void getSettings().then((value) => {
@@ -164,6 +166,28 @@ function App() {
     await saveSettings(next);
   };
 
+  const captureShortcut = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Backspace" || event.key === "Delete") {
+      void updatePreference("selectionShortcut", "");
+      setShortcutMessage("已关闭网页划词快捷键");
+      return;
+    }
+    const shortcut = shortcutFromEvent(event.nativeEvent);
+    if (!shortcut) return;
+    if (!event.ctrlKey && !event.altKey && !event.metaKey) {
+      setShortcutMessage("请至少搭配 Ctrl、Alt 或 Command 键");
+      return;
+    }
+    void updatePreference("selectionShortcut", shortcut);
+    setShortcutMessage(`已保存：${shortcut}`);
+  };
+
+  const openGlobalShortcuts = async () => {
+    await browser.tabs.create({ url: "chrome://extensions/shortcuts" });
+  };
+
   const isSaved = useMemo(() => settings?.providers.some((item) => item.id === draft?.id) ?? false, [draft?.id, settings?.providers]);
   if (!settings || !draft) return <div className="loading">正在加载设置…</div>;
 
@@ -236,6 +260,21 @@ function App() {
               <label><span>界面语言</span><select value={settings.locale} onChange={(e) => void updatePreference("locale", e.target.value as Settings["locale"])}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
             </div>
             <label className="switch-row"><span><strong>在浮窗中显示原文</strong><small>关闭后只展示翻译结果。</small></span><input type="checkbox" checked={settings.showSource} onChange={(e) => void updatePreference("showSource", e.target.checked)} /></label>
+            <div className="shortcut-setting">
+              <div className="shortcut-heading"><Keyboard size={18} /><div><strong>网页划词快捷键</strong><small>网页处于焦点时，翻译当前选中的文字。</small></div></div>
+              <div className="shortcut-controls">
+                <input
+                  className="shortcut-recorder"
+                  aria-label="网页划词快捷键"
+                  readOnly
+                  value={settings.selectionShortcut || "未设置"}
+                  onFocus={() => setShortcutMessage("请按下组合键，按 Delete 可清除")}
+                  onKeyDown={captureShortcut}
+                />
+                <button className="secondary" type="button" onClick={() => void openGlobalShortcuts()}><ExternalLink size={15} />管理浏览器全局快捷键</button>
+              </div>
+              <p>{shortcutMessage}</p>
+            </div>
           </div>
         </Section>
 
