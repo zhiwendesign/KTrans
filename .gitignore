@@ -1,0 +1,7 @@
+node_modules
+.wxt
+.output
+.npm-cache
+outputs
+*.zip
+.DS_Store
